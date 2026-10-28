@@ -1,0 +1,135 @@
+name: Build Kernel - WSA
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Build WSA-Kernel-${{ inputs.version }}-x86_64
+    runs-on: ubuntu-22.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: Install Build Tools
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: bc bison build-essential flex libelf-dev binutils-x86-64-linux-gnu gzip ccache curl wget xz-utils
+          version: 1.0
+
+      - name: Cache LLVM
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: ./llvm
+          key: llvm-12.0.1
+
+      - name: Setup LLVM
+        uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "12.0.1"
+          force-version: true
+          ubuntu-version: "16.04"
+          cached: ${{ steps.cache-llvm.outputs.cache-hit }}
+
+      - name: Checkout KernelSU-Next
+        uses: actions/checkout@v4
+        with:
+          repository: KernelSU-Next/KernelSU-Next
+          ref: dev
+          path: KernelSU
+          fetch-depth: 0
+
+      - name: Setup WSA kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/WSA-Linux-Kernel
+          ref: android-lts/latte-2/${{ inputs.version }}
+          path: WSA-Linux-Kernel
+
+      - name: Setup Ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: WSA-Kernel-${{ inputs.version }}-x86_64
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          max-size: 2G
+
+      - name: Setup KernelSU integration
+        working-directory: WSA-Linux-Kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          KERNEL_ROOT="$GITHUB_WORKSPACE/WSA-Linux-Kernel"
+
+          echo "[+] Copy KernelSU driver"
+          ln -sfn "$GITHUB_WORKSPACE/KernelSU/kernel" "$KERNEL_ROOT/drivers/kernelsu"
+
+          echo "[+] Add KernelSU driver to Makefile"
+          DRIVER_MAKEFILE="$KERNEL_ROOT/drivers/Makefile"
+          DRIVER_KCONFIG="$KERNEL_ROOT/drivers/Kconfig"
+          grep -q "kernelsu" "$DRIVER_MAKEFILE" || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> "$DRIVER_MAKEFILE"
+          grep -q "kernelsu" "$DRIVER_KCONFIG" || sed -i "/endmenu/i\\source \"drivers/kernelsu/Kconfig\"" "$DRIVER_KCONFIG"
+
+          PATCH_DIR="$GITHUB_WORKSPACE/KernelSU/.github/patches/5.15"
+          if [ -d "$PATCH_DIR" ]; then
+            shopt -s nullglob
+            PATCHES=("$PATCH_DIR"/*.patch)
+            if [ ${#PATCHES[@]} -gt 0 ]; then
+              echo "[+] Applying KernelSU patches"
+              cd "$KERNEL_ROOT"
+              git apply "${PATCHES[@]}"
+            else
+              echo "[-] No KernelSU 5.15 patches found"
+            fi
+          else
+            echo "[-] No patch directory at $PATCH_DIR"
+          fi
+
+          cd "$GITHUB_WORKSPACE/KernelSU"
+          VERSION=$(($(git rev-list --count HEAD) + 10200))
+          echo "VERSION: $VERSION"
+          echo "kernelsu_version=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build WSA x86_64 kernel
+        working-directory: WSA-Linux-Kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cp configs/wsa/config-wsa-x64 .config
+          scripts/config --enable KSU_X86_PATCH_SYSCALL_DISPATCHER
+          make olddefconfig
+
+          make -j"$(nproc)" LLVM=1 ARCH=x86_64 \
+            bzImage \
+            CCACHE="/usr/bin/ccache"
+
+          OUTPUT_PATH="arch/x86/boot/bzImage"
+          if [ ! -f "$OUTPUT_PATH" ]; then
+            echo "bzImage not found at $OUTPUT_PATH"
+            find . -type f -name 'bzImage' -o -name 'Image' -o -name 'kernel' | head
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$OUTPUT_PATH" "$GITHUB_WORKSPACE/out/kernel"
+          cp "$OUTPUT_PATH" "$GITHUB_WORKSPACE/out/bzImage"
+
+          echo "file_path=$OUTPUT_PATH" >> "$GITHUB_ENV"
+          echo "artifact_kernel=$GITHUB_WORKSPACE/out/kernel" >> "$GITHUB_ENV"
+
+      - name: Upload raw kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-WSA-x86_64-${{ inputs.version }}
+          path: |
+            out/kernel
+            out/bzImage
+          if-no-files-found: error
