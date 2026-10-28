@@ -6,10 +6,17 @@ on:
       version:
         required: true
         type: string
+      arch:
+        required: true
+        type: string
+      brand_name:
+        required: false
+        type: string
+        default: "WSA"
 
 jobs:
   build:
-    name: Build WSA-Kernel-${{ inputs.version }}-x86_64
+    name: Build WSA-${{ inputs.version }}-${{ inputs.arch }}
     runs-on: ubuntu-22.04
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
@@ -107,18 +114,18 @@ jobs:
           scripts/config --enable KSU_X86_PATCH_SYSCALL_DISPATCHER
           make olddefconfig
 
-          make -j"$(nproc)" LLVM=1 ARCH=x86_64 \
-            bzImage \
-            CCACHE="/usr/bin/ccache"
+          make -j"$(nproc)" LLVM=1 ARCH=x86_64 bzImage CCACHE="/usr/bin/ccache"
 
           OUTPUT_PATH="arch/x86/boot/bzImage"
           if [ ! -f "$OUTPUT_PATH" ]; then
             echo "bzImage not found at $OUTPUT_PATH"
-            find . -type f -name 'bzImage' -o -name 'Image' -o -name 'kernel' | head
+            find . -type f \( -name 'bzImage' -o -name 'Image' -o -name 'kernel' \) | head
             exit 1
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/out"
+
+          # keep a stable WSA-friendly output name
           cp "$OUTPUT_PATH" "$GITHUB_WORKSPACE/out/kernel"
           cp "$OUTPUT_PATH" "$GITHUB_WORKSPACE/out/bzImage"
 
