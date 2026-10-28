@@ -11,9 +11,9 @@ on:
         default: "5.15.x"
 
       os_patch_level:
-        description: "WSA patch level (example: 104.4, 104.5, 94.2, or 2025-01 style label)"
+        description: "WSA patch level or date label (examples: 104, 104.4, 105, 2025-01)"
         type: string
-        default: "104.4"
+        default: "104"
 
       brand_name:
         description: "Kernel branding"
@@ -57,60 +57,31 @@ on:
         default: "verified"
 
       build_features:
-        description: "Feature set"
+        description: "WSA build feature preset"
         type: choice
         options:
           - "default"
           - "minimal"
+          - "performance"
           - "custom"
         default: "default"
+
+      extra_makeflags:
+        description: "Extra make flags (optional)"
+        type: string
+        default: ""
 
   push:
     branches: ["main", "ci", "checkci"]
     paths:
       - ".github/workflows/build-kernel-wsa.yml"
-      - ".github/workflows/wsa-kernel.yml"
       - "kernel/**"
 
   pull_request:
     branches: ["main"]
     paths:
       - ".github/workflows/build-kernel-wsa.yml"
-      - ".github/workflows/wsa-kernel.yml"
       - "kernel/**"
-
-  workflow_call:
-    inputs:
-      kernel_build_version:
-        required: true
-        type: string
-      os_patch_level:
-        required: true
-        type: string
-      brand_name:
-        required: false
-        type: string
-        default: "WSA"
-      release_type:
-        required: false
-        type: string
-        default: "Action"
-      use_cache:
-        required: false
-        type: boolean
-        default: true
-      root_flavor:
-        required: false
-        type: string
-        default: "KernelSU-Next"
-      commit_mode:
-        required: false
-        type: string
-        default: "verified"
-      build_features:
-        required: false
-        type: string
-        default: "default"
 
 jobs:
   prepare:
@@ -118,7 +89,6 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       version_label: ${{ steps.resolve.outputs.version_label }}
-      build_tag: ${{ steps.resolve.outputs.build_tag }}
 
     steps:
       - name: Resolve WSA version
@@ -128,31 +98,212 @@ jobs:
           set -euxo pipefail
 
           INPUT="${{ inputs.os_patch_level }}"
-          INPUT="${INPUT:-104.4}"
+          INPUT="${INPUT:-104}"
 
-          if [[ "$INPUT" =~ ^5\.15\..* ]]; then
-            VERSION="$INPUT"
-          elif [[ "$INPUT" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+          if [[ "$INPUT" =~ ^[0-9]+$ ]]; then
+            VERSION="5.15.${INPUT}"
+          elif [[ "$INPUT" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            VERSION="5.15.${INPUT}"
+          elif [[ "$INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             VERSION="5.15.${INPUT}"
           elif [[ "$INPUT" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
-            VERSION="5.15.104.4"
+            case "$INPUT" in
+              2025-01) VERSION="5.15.104.4" ;;
+              2025-02) VERSION="5.15.104.5" ;;
+              2025-03) VERSION="5.15.104.6" ;;
+              *) VERSION="5.15.104.4" ;;
+            esac
           else
-            VERSION="5.15.${INPUT}"
+            VERSION="5.15.104.4"
           fi
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_label=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "build_tag=WSA-${VERSION}-x86_64" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
-    uses: ./.github/workflows/wsa-kernel.yml
-    with:
-      version: ${{ needs.prepare.outputs.version }}
-      arch: "x86_64"
-      brand_name: ${{ inputs.brand_name || 'WSA' }}
-      root_flavor: ${{ inputs.root_flavor || 'KernelSU-Next' }}
-      commit_mode: ${{ inputs.commit_mode || 'verified' }}
-      use_cache: ${{ inputs.use_cache || true }}
-      release_type: ${{ inputs.release_type || 'Action' }}
-      build_features: ${{ inputs.build_features || 'default' }}
+    runs-on: ubuntu-22.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: Info
+        shell: bash
+        run: |
+          echo "WSA kernel build"
+          echo "version=${{ needs.prepare.outputs.version }}"
+          echo "kernel_build_version=${{ inputs.kernel_build_version }}"
+          echo "os_patch_level=${{ inputs.os_patch_level }}"
+          echo "brand_name=${{ inputs.brand_name }}"
+          echo "release_type=${{ inputs.release_type }}"
+          echo "use_cache=${{ inputs.use_cache }}"
+          echo "root_flavor=${{ inputs.root_flavor }}"
+          echo "commit_mode=${{ inputs.commit_mode }}"
+          echo "build_features=${{ inputs.build_features }}"
+          echo "extra_makeflags=${{ inputs.extra_makeflags }}"
+
+      - name: Install Build Tools
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: bc bison build-essential flex libelf-dev binutils-x86-64-linux-gnu gzip ccache curl wget xz-utils
+          version: 1.0
+
+      - name: Restore ccache
+        if: ${{ inputs.use_cache }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ccache
+            /tmp/ccache
+          key: wsa-kernel-${{ needs.prepare.outputs.version }}-x86_64-${{ github.ref_name }}
+          restore-keys: |
+            wsa-kernel-${{ needs.prepare.outputs.version }}-x86_64-
+            wsa-kernel-
+          enableCrossOsArchive: true
+
+      - name: Cache LLVM
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: ./llvm
+          key: llvm-12.0.1
+
+      - name: Setup LLVM
+        uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "12.0.1"
+          force-version: true
+          ubuntu-version: "16.04"
+          cached: ${{ steps.cache-llvm.outputs.cache-hit }}
+
+      - name: Checkout KernelSU-Next
+        uses: actions/checkout@v4
+        with:
+          repository: KernelSU-Next/KernelSU-Next
+          ref: dev
+          path: KernelSU
+          fetch-depth: 0
+
+      - name: Setup WSA kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/WSA-Linux-Kernel
+          ref: android-lts/latte-2/${{ needs.prepare.outputs.version }}
+          path: WSA-Linux-Kernel
+
+      - name: Setup Ccache
+        if: ${{ inputs.use_cache }}
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: WSA-Kernel-${{ needs.prepare.outputs.version }}-x86_64
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          max-size: 2G
+
+      - name: Configure root flavor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          case "${{ inputs.root_flavor }}" in
+            "KernelSU-Next") echo "using KernelSU-Next" ;;
+            "KernelSU") echo "using KernelSU" ;;
+            "BakaSU") echo "using BakaSU" ;;
+            "FinaSU") echo "using FinaSU" ;;
+            "SukiSU-Ultra") echo "using SukiSU-Ultra" ;;
+            "KowSU") echo "using KowSU" ;;
+            "No Root") echo "no root flavor selected for WSA build" ;;
+            *) echo "root flavor unknown: ${{ inputs.root_flavor }}" ;;
+          esac
+
+      - name: Setup KernelSU integration
+        working-directory: WSA-Linux-Kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          KERNEL_ROOT="$GITHUB_WORKSPACE/WSA-Linux-Kernel"
+
+          echo "[+] Copy KernelSU driver"
+          ln -sfn "$GITHUB_WORKSPACE/KernelSU/kernel" "$KERNEL_ROOT/drivers/kernelsu"
+
+          DRIVER_MAKEFILE="$KERNEL_ROOT/drivers/Makefile"
+          DRIVER_KCONFIG="$KERNEL_ROOT/drivers/Kconfig"
+          grep -q "kernelsu" "$DRIVER_MAKEFILE" || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> "$DRIVER_MAKEFILE"
+          grep -q "kernelsu" "$DRIVER_KCONFIG" || sed -i "/endmenu/i\\source \"drivers/kernelsu/Kconfig\"" "$DRIVER_KCONFIG"
+
+          PATCH_DIR="$GITHUB_WORKSPACE/KernelSU/.github/patches/5.15"
+          if [ -d "$PATCH_DIR" ]; then
+            shopt -s nullglob
+            PATCHES=("$PATCH_DIR"/*.patch)
+            if [ ${#PATCHES[@]} -gt 0 ]; then
+              echo "[+] Applying KernelSU patches"
+              cd "$KERNEL_ROOT"
+              git apply "${PATCHES[@]}"
+            else
+              echo "[-] No KernelSU 5.15 patches found"
+            fi
+          else
+            echo "[-] No patch directory at $PATCH_DIR"
+          fi
+
+          cd "$GITHUB_WORKSPACE/KernelSU"
+          VERSION=$(($(git rev-list --count HEAD) + 10200))
+          echo "VERSION: $VERSION"
+          echo "kernelsu_version=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build WSA x86_64 kernel
+        working-directory: WSA-Linux-Kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cp configs/wsa/config-wsa-x64 .config
+          scripts/config --enable KSU_X86_PATCH_SYSCALL_DISPATCHER
+          make olddefconfig
+
+          EXTRA_FLAGS="${{ inputs.extra_makeflags }}"
+          if [ -n "$EXTRA_FLAGS" ]; then
+            echo "Using extra build flags: $EXTRA_FLAGS"
+          fi
+
+          make -j"$(nproc)" LLVM=1 ARCH=x86_64 bzImage $EXTRA_FLAGS CCACHE="/usr/bin/ccache"
+
+          OUTPUT_PATH="arch/x86/boot/bzImage"
+          if [ ! -f "$OUTPUT_PATH" ]; then
+            echo "bzImage not found at $OUTPUT_PATH"
+            find . -type f \( -name 'bzImage' -o -name 'Image' -o -name 'kernel' \) | head
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/out"
+
+          cp "$OUTPUT_PATH" "$GITHUB_WORKSPACE/out/kernel"
+          cp "$OUTPUT_PATH" "$GITHUB_WORKSPACE/out/bzImage"
+
+      - name: Write build info
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          cat > out/build-info.txt <<EOF
+          version=${{ needs.prepare.outputs.version }}
+          kernel_build_version=${{ inputs.kernel_build_version }}
+          os_patch_level=${{ inputs.os_patch_level }}
+          brand_name=${{ inputs.brand_name }}
+          release_type=${{ inputs.release_type }}
+          root_flavor=${{ inputs.root_flavor }}
+          commit_mode=${{ inputs.commit_mode }}
+          build_features=${{ inputs.build_features }}
+          extra_makeflags=${{ inputs.extra_makeflags }}
+          EOF
+
+      - name: Upload raw kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-WSA-x86_64-${{ needs.prepare.outputs.version }}
+          path: |
+            out/kernel
+            out/bzImage
+            out/build-info.txt
+          if-no-files-found: error
