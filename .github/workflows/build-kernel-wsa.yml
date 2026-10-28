@@ -1,33 +1,78 @@
-name: Build Kernel - WSA (5.15 x86_64)
+name: Build Kernel - WSA
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "WSA kernel version (example: 5.15.104.4)"
-        required: true
-        default: "5.15.104.4"
+      kernel_build_version:
+        description: "Kernel family"
+        type: choice
+        options:
+          - "5.15.x"
+        default: "5.15.x"
+      os_patch_level:
+        description: "WSA 5.15 patch level (examples: 104.4, 104.5, 104.6, or full 5.15.104.4)"
         type: string
+        default: "104.4"
+      brand_name:
+        description: "Kernel branding"
+        type: string
+        default: "WSA"
+
   push:
     branches: ["main", "ci", "checkci"]
     paths:
       - ".github/workflows/build-kernel-wsa.yml"
       - ".github/workflows/wsa-kernel.yml"
       - "kernel/**"
+
   pull_request:
     branches: ["main"]
     paths:
       - ".github/workflows/build-kernel-wsa.yml"
       - ".github/workflows/wsa-kernel.yml"
       - "kernel/**"
+
   workflow_call:
     inputs:
-      version:
+      kernel_build_version:
         required: true
         type: string
+      os_patch_level:
+        required: true
+        type: string
+      brand_name:
+        required: false
+        type: string
+        default: "WSA"
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      target: ${{ steps.resolve.outputs.target }}
+
+    steps:
+      - name: Resolve WSA version
+        id: resolve
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          INPUT="${{ inputs.os_patch_level }}"
+          if [[ "$INPUT" =~ ^5\.15\..* ]]; then
+            VERSION="$INPUT"
+          else
+            VERSION="5.15.${INPUT}"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "target=WSA-x86_64" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
     uses: ./.github/workflows/wsa-kernel.yml
     with:
-      version: ${{ inputs.version || '5.15.104.4' }}
+      version: ${{ needs.prepare.outputs.version }}
+      arch: "x86_64"
+      brand_name: ${{ inputs.brand_name || 'WSA' }}
