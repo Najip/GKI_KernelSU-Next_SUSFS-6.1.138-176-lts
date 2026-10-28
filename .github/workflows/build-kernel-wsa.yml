@@ -3,6 +3,14 @@ name: Build Kernel - WSA
 on:
   workflow_dispatch:
     inputs:
+      source:
+        description: "Kernel source"
+        type: choice
+        options:
+          - "latest-ms"
+          - "latest-android"
+        default: "latest-ms"
+
       kernel_build_version:
         description: "Kernel family"
         type: choice
@@ -11,9 +19,9 @@ on:
         default: "5.15.x"
 
       os_patch_level:
-        description: "WSA patch level or date label (examples: 104, 104.4, 105, 2025-01)"
+        description: "Patch level or date label (examples: 104, 104.4, 105, 2025-01)"
         type: string
-        default: "104"
+        default: "latest"
 
       brand_name:
         description: "Kernel branding"
@@ -67,58 +75,70 @@ on:
         default: "default"
 
       extra_makeflags:
-        description: "Extra make flags (optional)"
+        description: "Extra make flags"
         type: string
         default: ""
-
-  push:
-    branches: ["main", "ci", "checkci"]
-    paths:
-      - ".github/workflows/build-kernel-wsa.yml"
-      - "kernel/**"
-
-  pull_request:
-    branches: ["main"]
-    paths:
-      - ".github/workflows/build-kernel-wsa.yml"
-      - "kernel/**"
 
 jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
+      source: ${{ steps.resolve.outputs.source }}
+      resolved_ref: ${{ steps.resolve.outputs.resolved_ref }}
       version: ${{ steps.resolve.outputs.version }}
-      version_label: ${{ steps.resolve.outputs.version_label }}
 
     steps:
-      - name: Resolve WSA version
+      - name: Resolve source + version
         id: resolve
         shell: bash
         run: |
           set -euxo pipefail
 
-          INPUT="${{ inputs.os_patch_level }}"
-          INPUT="${INPUT:-104}"
+          SOURCE="${{ inputs.source }}"
+          PATCH="${{ inputs.os_patch_level }}"
+          PATCH="${PATCH:-latest}"
 
-          if [[ "$INPUT" =~ ^[0-9]+$ ]]; then
-            VERSION="5.15.${INPUT}"
-          elif [[ "$INPUT" =~ ^[0-9]+\.[0-9]+$ ]]; then
-            VERSION="5.15.${INPUT}"
-          elif [[ "$INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            VERSION="5.15.${INPUT}"
-          elif [[ "$INPUT" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
-            case "$INPUT" in
-              2025-01) VERSION="5.15.104.4" ;;
-              2025-02) VERSION="5.15.104.5" ;;
-              2025-03) VERSION="5.15.104.6" ;;
-              *) VERSION="5.15.104.4" ;;
-            esac
-          else
-            VERSION="5.15.104.4"
+          if [[ "$SOURCE" == "latest-ms" ]]; then
+            echo "source=latest-ms" >> "$GITHUB_OUTPUT"
+
+            # Use the latest public Microsoft WSA ref
+            RESOLVED_REF="$(git ls-remote --heads --tags https://github.com/microsoft/WSA-Linux-Kernel.git \
+              | awk '{print $2}' \
+              | grep -E '5\\.15|latte|android-lts|linux-msft' \
+              | sort -V \
+              | tail -n 1)"
+
+            if [ -z "$RESOLVED_REF" ]; then
+              RESOLVED_REF="main"
+            fi
+
+            echo "resolved_ref=$RESOLVED_REF" >> "$GITHUB_OUTPUT"
+            echo "version=latest-ms" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "version_label=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [[ "$SOURCE" == "latest-android" ]]; then
+            echo "source=latest-android" >> "$GITHUB_OUTPUT"
+
+            # Use the newest Android upstream common-kernel ref compatible with 5.15
+            RESOLVED_REF="$(git ls-remote --heads --tags https://android.googlesource.com/kernel/common.git \
+              | awk '{print $2}' \
+              | grep -E '5\\.15|android.*5\\.15|android.*lts|android.*common' \
+              | sort -V \
+              | tail -n 1)"
+
+            if [ -z "$RESOLVED_REF" ]; then
+              # fallback to the default Android common repo HEAD if the 5.15 ref is not visible
+              RESOLVED_REF="refs/heads/main"
+            fi
+
+            echo "resolved_ref=$RESOLVED_REF" >> "$GITHUB_OUTPUT"
+            echo "version=latest-android" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Unknown source: $SOURCE"
+          exit 1
 
   build:
     needs: prepare
@@ -132,7 +152,8 @@ jobs:
       - name: Info
         shell: bash
         run: |
-          echo "WSA kernel build"
+          echo "source=${{ needs.prepare.outputs.source }}"
+          echo "resolved_ref=${{ needs.prepare.outputs.resolved_ref }}"
           echo "version=${{ needs.prepare.outputs.version }}"
           echo "kernel_build_version=${{ inputs.kernel_build_version }}"
           echo "os_patch_level=${{ inputs.os_patch_level }}"
@@ -157,9 +178,9 @@ jobs:
           path: |
             ~/.ccache
             /tmp/ccache
-          key: wsa-kernel-${{ needs.prepare.outputs.version }}-x86_64-${{ github.ref_name }}
+          key: wsa-kernel-${{ needs.prepare.outputs.source }}-${{ github.ref_name }}
           restore-keys: |
-            wsa-kernel-${{ needs.prepare.outputs.version }}-x86_64-
+            wsa-kernel-${{ needs.prepare.outputs.source }}-
             wsa-kernel-
           enableCrossOsArchive: true
 
@@ -186,35 +207,28 @@ jobs:
           path: KernelSU
           fetch-depth: 0
 
-      - name: Setup WSA kernel source
-        uses: actions/checkout@v4
-        with:
-          repository: microsoft/WSA-Linux-Kernel
-          ref: android-lts/latte-2/${{ needs.prepare.outputs.version }}
-          path: WSA-Linux-Kernel
+      - name: Setup WSA or Android kernel source
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if [[ "${{ needs.prepare.outputs.source }}" == "latest-ms" ]]; then
+            git clone --depth 1 --branch "${{ needs.prepare.outputs.resolved_ref }}" https://github.com/microsoft/WSA-Linux-Kernel.git WSA-Linux-Kernel || \
+            git clone --depth 1 https://github.com/microsoft/WSA-Linux-Kernel.git WSA-Linux-Kernel
+          elif [[ "${{ needs.prepare.outputs.source }}" == "latest-android" ]]; then
+            git clone --depth 1 https://android.googlesource.com/kernel/common.git WSA-Linux-Kernel
+          else
+            echo "Unknown source"
+            exit 1
+          fi
 
       - name: Setup Ccache
         if: ${{ inputs.use_cache }}
         uses: hendrikmuhs/ccache-action@v1
         with:
-          key: WSA-Kernel-${{ needs.prepare.outputs.version }}-x86_64
+          key: WSA-Kernel-${{ needs.prepare.outputs.source }}-x86_64
           save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           max-size: 2G
-
-      - name: Configure root flavor
-        shell: bash
-        run: |
-          set -euxo pipefail
-          case "${{ inputs.root_flavor }}" in
-            "KernelSU-Next") echo "using KernelSU-Next" ;;
-            "KernelSU") echo "using KernelSU" ;;
-            "BakaSU") echo "using BakaSU" ;;
-            "FinaSU") echo "using FinaSU" ;;
-            "SukiSU-Ultra") echo "using SukiSU-Ultra" ;;
-            "KowSU") echo "using KowSU" ;;
-            "No Root") echo "no root flavor selected for WSA build" ;;
-            *) echo "root flavor unknown: ${{ inputs.root_flavor }}" ;;
-          esac
 
       - name: Setup KernelSU integration
         working-directory: WSA-Linux-Kernel
@@ -252,13 +266,20 @@ jobs:
           echo "VERSION: $VERSION"
           echo "kernelsu_version=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Build WSA x86_64 kernel
+      - name: Build x86_64 kernel
         working-directory: WSA-Linux-Kernel
         shell: bash
         run: |
           set -euxo pipefail
 
-          cp configs/wsa/config-wsa-x64 .config
+          # WSA uses x64 config pattern
+          if [ -f "configs/wsa/config-wsa-x64" ]; then
+            cp configs/wsa/config-wsa-x64 .config
+          else
+            # Android upstream may not use the WSA config file, so fall back to default x86_64 config
+            ARCH=x86_64 make defconfig
+          fi
+
           scripts/config --enable KSU_X86_PATCH_SYSCALL_DISPATCHER
           make olddefconfig
 
@@ -287,7 +308,8 @@ jobs:
           set -euxo pipefail
           mkdir -p out
           cat > out/build-info.txt <<EOF
-          version=${{ needs.prepare.outputs.version }}
+          source=${{ needs.prepare.outputs.source }}
+          resolved_ref=${{ needs.prepare.outputs.resolved_ref }}
           kernel_build_version=${{ inputs.kernel_build_version }}
           os_patch_level=${{ inputs.os_patch_level }}
           brand_name=${{ inputs.brand_name }}
@@ -301,7 +323,7 @@ jobs:
       - name: Upload raw kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-WSA-x86_64-${{ needs.prepare.outputs.version }}
+          name: kernel-${{ needs.prepare.outputs.source }}-x86_64-${{ needs.prepare.outputs.resolved_ref }}
           path: |
             out/kernel
             out/bzImage
