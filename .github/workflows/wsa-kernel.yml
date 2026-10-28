@@ -13,6 +13,26 @@ on:
         required: false
         type: string
         default: "WSA"
+      root_flavor:
+        required: false
+        type: string
+        default: "KernelSU-Next"
+      commit_mode:
+        required: false
+        type: string
+        default: "verified"
+      use_cache:
+        required: false
+        type: boolean
+        default: true
+      release_type:
+        required: false
+        type: string
+        default: "Action"
+      build_features:
+        required: false
+        type: string
+        default: "default"
 
 jobs:
   build:
@@ -24,11 +44,37 @@ jobs:
       CCACHE_HARDLINK: "true"
 
     steps:
+      - name: Info
+        shell: bash
+        run: |
+          echo "WSA kernel build"
+          echo "version=${{ inputs.version }}"
+          echo "arch=${{ inputs.arch }}"
+          echo "brand_name=${{ inputs.brand_name }}"
+          echo "root_flavor=${{ inputs.root_flavor }}"
+          echo "commit_mode=${{ inputs.commit_mode }}"
+          echo "release_type=${{ inputs.release_type }}"
+          echo "build_features=${{ inputs.build_features }}"
+          echo "use_cache=${{ inputs.use_cache }}"
+
       - name: Install Build Tools
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
           packages: bc bison build-essential flex libelf-dev binutils-x86-64-linux-gnu gzip ccache curl wget xz-utils
           version: 1.0
+
+      - name: Restore ccache
+        if: ${{ inputs.use_cache }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ccache
+            /tmp/ccache
+          key: wsa-kernel-${{ inputs.version }}-${{ inputs.arch }}-${{ github.ref_name }}
+          restore-keys: |
+            wsa-kernel-${{ inputs.version }}-${{ inputs.arch }}-
+            wsa-kernel-
+          enableCrossOsArchive: true
 
       - name: Cache LLVM
         id: cache-llvm
@@ -61,11 +107,27 @@ jobs:
           path: WSA-Linux-Kernel
 
       - name: Setup Ccache
+        if: ${{ inputs.use_cache }}
         uses: hendrikmuhs/ccache-action@v1
         with:
-          key: WSA-Kernel-${{ inputs.version }}-x86_64
+          key: WSA-Kernel-${{ inputs.version }}-${{ inputs.arch }}
           save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           max-size: 2G
+
+      - name: Configure root flavor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          case "${{ inputs.root_flavor }}" in
+            "KernelSU-Next") echo "using KernelSU-Next" ;;
+            "KernelSU") echo "using KernelSU" ;;
+            "BakaSU") echo "using BakaSU" ;;
+            "FinaSU") echo "using FinaSU" ;;
+            "SukiSU-Ultra") echo "using SukiSU-Ultra" ;;
+            "KowSU") echo "using KowSU" ;;
+            "No Root") echo "no root flavor selected for WSA build" ;;
+            *) echo "root flavor unknown: ${{ inputs.root_flavor }}" ;;
+          esac
 
       - name: Setup KernelSU integration
         working-directory: WSA-Linux-Kernel
@@ -125,18 +187,32 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/out"
 
-          # keep a stable WSA-friendly output name
           cp "$OUTPUT_PATH" "$GITHUB_WORKSPACE/out/kernel"
           cp "$OUTPUT_PATH" "$GITHUB_WORKSPACE/out/bzImage"
 
-          echo "file_path=$OUTPUT_PATH" >> "$GITHUB_ENV"
-          echo "artifact_kernel=$GITHUB_WORKSPACE/out/kernel" >> "$GITHUB_ENV"
+          echo "kernel_output_path=$GITHUB_WORKSPACE/out/kernel" >> "$GITHUB_ENV"
+
+      - name: Write build info
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          cat > out/build-info.txt <<EOF
+          version=${{ inputs.version }}
+          arch=${{ inputs.arch }}
+          root_flavor=${{ inputs.root_flavor }}
+          release_type=${{ inputs.release_type }}
+          commit_mode=${{ inputs.commit_mode }}
+          build_features=${{ inputs.build_features }}
+          brand_name=${{ inputs.brand_name }}
+          EOF
 
       - name: Upload raw kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-WSA-x86_64-${{ inputs.version }}
+          name: kernel-WSA-${{ inputs.arch }}-${{ inputs.version }}
           path: |
             out/kernel
             out/bzImage
+            out/build-info.txt
           if-no-files-found: error
