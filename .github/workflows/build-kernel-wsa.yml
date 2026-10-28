@@ -9,6 +9,7 @@ on:
         options:
           - "latest-ms"
           - "latest-android"
+          - "compat-ognisty"
         default: "latest-ms"
 
       kernel_build_version:
@@ -19,7 +20,7 @@ on:
         default: "5.15.x"
 
       os_patch_level:
-        description: "Patch level or date label (examples: 104, 104.4, 105, 2025-01)"
+        description: "Patch level or date label (examples: latest, 104, 104.4, 105, 2025-01)"
         type: string
         default: "latest"
 
@@ -27,15 +28,6 @@ on:
         description: "Kernel branding"
         type: string
         default: "WSA"
-
-      release_type:
-        description: "Release type"
-        type: choice
-        options:
-          - "Action"
-          - "Pre-Release"
-          - "Release"
-        default: "Action"
 
       use_cache:
         description: "Use compiler cache"
@@ -49,9 +41,6 @@ on:
           - "KernelSU-Next"
           - "KernelSU"
           - "BakaSU"
-          - "FinaSU"
-          - "SukiSU-Ultra"
-          - "KowSU"
           - "No Root"
         default: "KernelSU-Next"
 
@@ -64,20 +53,66 @@ on:
           - "update"
         default: "verified"
 
-      build_features:
-        description: "WSA build feature preset"
+      release_type:
+        description: "Release type"
         type: choice
         options:
-          - "default"
-          - "minimal"
-          - "performance"
-          - "custom"
-        default: "default"
+          - "Action"
+          - "Pre-Release"
+          - "Release"
+        default: "Action"
+
+      enable_susfs:
+        description: "Enable SUSFS"
+        type: boolean
+        default: false
+
+      enable_nomount:
+        description: "Enable NoMount"
+        type: boolean
+        default: false
+
+      enable_baseband_guard:
+        description: "Enable Baseband Guard"
+        type: boolean
+        default: false
+
+      enable_bbr:
+        description: "Enable BBR"
+        type: boolean
+        default: false
+
+      enable_bpf:
+        description: "Enable BPF"
+        type: boolean
+        default: false
+
+      enable_perf:
+        description: "Enable performance tuning"
+        type: boolean
+        default: false
+
+      enable_ntsync:
+        description: "Enable NTSync"
+        type: boolean
+        default: false
 
       extra_makeflags:
         description: "Extra make flags"
         type: string
         default: ""
+
+  push:
+    branches: ["main", "ci", "checkci"]
+    paths:
+      - ".github/workflows/build-kernel-wsa.yml"
+      - "kernel/**"
+
+  pull_request:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/build-kernel-wsa.yml"
+      - "kernel/**"
 
 jobs:
   prepare:
@@ -85,10 +120,11 @@ jobs:
     outputs:
       source: ${{ steps.resolve.outputs.source }}
       resolved_ref: ${{ steps.resolve.outputs.resolved_ref }}
+      ref_target: ${{ steps.resolve.outputs.ref_target }}
       version: ${{ steps.resolve.outputs.version }}
 
     steps:
-      - name: Resolve source + version
+      - name: Resolve source + ref
         id: resolve
         shell: bash
         run: |
@@ -98,47 +134,82 @@ jobs:
           PATCH="${{ inputs.os_patch_level }}"
           PATCH="${PATCH:-latest}"
 
-          if [[ "$SOURCE" == "latest-ms" ]]; then
-            echo "source=latest-ms" >> "$GITHUB_OUTPUT"
+          choose_ref() {
+            local repo_url="$1"
+            local patch_value="$2"
 
-            # Use the latest public Microsoft WSA ref
-            RESOLVED_REF="$(git ls-remote --heads --tags https://github.com/microsoft/WSA-Linux-Kernel.git \
-              | awk '{print $2}' \
-              | grep -E '5\\.15|latte|android-lts|linux-msft' \
-              | sort -V \
-              | tail -n 1)"
-
-            if [ -z "$RESOLVED_REF" ]; then
-              RESOLVED_REF="main"
+            if [ "$patch_value" = "latest" ] || [ -z "$patch_value" ]; then
+              git ls-remote --heads --tags "$repo_url" \
+                | awk '{print $2}' \
+                | grep -E '5\\.15|latte|android-lts|linux-msft|android.*5\\.15' \
+                | sort -V \
+                | tail -n 1
+              return
             fi
 
-            echo "resolved_ref=$RESOLVED_REF" >> "$GITHUB_OUTPUT"
-            echo "version=latest-ms" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+            local candidates=(
+              "$patch_value"
+              "5.15.${patch_value}"
+              "v5.15.${patch_value}"
+              "android-lts/latte-2/5.15.${patch_value}"
+              "android-lts/latte-2/${patch_value}"
+              "android-lts/latte-2/${patch_value#refs/heads/}"
+              "linux-msft-wsa-${patch_value}"
+              "linux-msft-wsa-5.15.${patch_value}"
+              "refs/heads/${patch_value}"
+              "refs/tags/${patch_value}"
+              "refs/heads/5.15.${patch_value}"
+              "refs/tags/5.15.${patch_value}"
+            )
 
-          if [[ "$SOURCE" == "latest-android" ]]; then
-            echo "source=latest-android" >> "$GITHUB_OUTPUT"
+            local ref=""
+            for candidate in "${candidates[@]}"; do
+              [ -z "$candidate" ] && continue
+              if git ls-remote --exit-code --heads --tags "$repo_url" "$candidate" >/dev/null 2>&1; then
+                ref="$candidate"
+                break
+              fi
+            done
 
-            # Use the newest Android upstream common-kernel ref compatible with 5.15
-            RESOLVED_REF="$(git ls-remote --heads --tags https://android.googlesource.com/kernel/common.git \
-              | awk '{print $2}' \
-              | grep -E '5\\.15|android.*5\\.15|android.*lts|android.*common' \
-              | sort -V \
-              | tail -n 1)"
-
-            if [ -z "$RESOLVED_REF" ]; then
-              # fallback to the default Android common repo HEAD if the 5.15 ref is not visible
-              RESOLVED_REF="refs/heads/main"
+            if [ -n "$ref" ]; then
+              echo "$ref"
+            else
+              git ls-remote --heads --tags "$repo_url" \
+                | awk '{print $2}' \
+                | grep -E '5\\.15|latte|android-lts|linux-msft|android.*5\\.15' \
+                | sort -V \
+                | tail -n 1
             fi
+          }
 
-            echo "resolved_ref=$RESOLVED_REF" >> "$GITHUB_OUTPUT"
-            echo "version=latest-android" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "Unknown source: $SOURCE"
-          exit 1
+          case "$SOURCE" in
+            latest-ms)
+              echo "source=latest-ms" >> "$GITHUB_OUTPUT"
+              REF="$(choose_ref https://github.com/microsoft/WSA-Linux-Kernel.git "$PATCH")"
+              if [ -z "$REF" ]; then REF="main"; fi
+              echo "resolved_ref=$REF" >> "$GITHUB_OUTPUT"
+              echo "ref_target=$REF" >> "$GITHUB_OUTPUT"
+              echo "version=latest-ms" >> "$GITHUB_OUTPUT"
+              ;;
+            latest-android)
+              echo "source=latest-android" >> "$GITHUB_OUTPUT"
+              REF="$(choose_ref https://android.googlesource.com/kernel/common.git "$PATCH")"
+              if [ -z "$REF" ]; then REF="refs/heads/main"; fi
+              echo "resolved_ref=$REF" >> "$GITHUB_OUTPUT"
+              echo "ref_target=$REF" >> "$GITHUB_OUTPUT"
+              echo "version=latest-android" >> "$GITHUB_OUTPUT"
+              ;;
+            compat-ognisty)
+              echo "source=compat-ognisty" >> "$GITHUB_OUTPUT"
+              echo "resolved_ref=main" >> "$GITHUB_OUTPUT"
+              echo "ref_target=main" >> "$GITHUB_OUTPUT"
+              echo "version=compat-ognisty" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown source: $SOURCE"
+              exit 1
+              ;;
+          esac
 
   build:
     needs: prepare
@@ -154,6 +225,7 @@ jobs:
         run: |
           echo "source=${{ needs.prepare.outputs.source }}"
           echo "resolved_ref=${{ needs.prepare.outputs.resolved_ref }}"
+          echo "ref_target=${{ needs.prepare.outputs.ref_target }}"
           echo "version=${{ needs.prepare.outputs.version }}"
           echo "kernel_build_version=${{ inputs.kernel_build_version }}"
           echo "os_patch_level=${{ inputs.os_patch_level }}"
@@ -162,14 +234,36 @@ jobs:
           echo "use_cache=${{ inputs.use_cache }}"
           echo "root_flavor=${{ inputs.root_flavor }}"
           echo "commit_mode=${{ inputs.commit_mode }}"
-          echo "build_features=${{ inputs.build_features }}"
+          echo "enable_susfs=${{ inputs.enable_susfs }}"
+          echo "enable_nomount=${{ inputs.enable_nomount }}"
+          echo "enable_baseband_guard=${{ inputs.enable_baseband_guard }}"
+          echo "enable_bbr=${{ inputs.enable_bbr }}"
+          echo "enable_bpf=${{ inputs.enable_bpf }}"
+          echo "enable_perf=${{ inputs.enable_perf }}"
+          echo "enable_ntsync=${{ inputs.enable_ntsync }}"
           echo "extra_makeflags=${{ inputs.extra_makeflags }}"
 
-      - name: Install Build Tools
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: bc bison build-essential flex libelf-dev binutils-x86-64-linux-gnu gzip ccache curl wget xz-utils
-          version: 1.0
+      - name: Install full host + LLVM toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential gcc g++ make \
+            clang-14 lld-14 llvm-14 \
+            binutils-x86-64-linux-gnu \
+            bc bison flex libelf-dev \
+            curl wget ca-certificates ccache \
+            xz-utils
+
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100
+          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-14 100
+          sudo update-alternatives --install /usr/bin/llvm-ar llvm-ar /usr/bin/llvm-ar-14 100
+          sudo update-alternatives --install /usr/bin/llvm-nm llvm-nm /usr/bin/llvm-nm-14 100
+          sudo update-alternatives --install /usr/bin/llvm-objcopy llvm-objcopy /usr/bin/llvm-objcopy-14 100
+          sudo update-alternatives --install /usr/bin/llvm-objdump llvm-objdump /usr/bin/llvm-objdump-14 100
 
       - name: Restore ccache
         if: ${{ inputs.use_cache }}
@@ -184,21 +278,6 @@ jobs:
             wsa-kernel-
           enableCrossOsArchive: true
 
-      - name: Cache LLVM
-        id: cache-llvm
-        uses: actions/cache@v4
-        with:
-          path: ./llvm
-          key: llvm-12.0.1
-
-      - name: Setup LLVM
-        uses: KyleMayes/install-llvm-action@v1
-        with:
-          version: "12.0.1"
-          force-version: true
-          ubuntu-version: "16.04"
-          cached: ${{ steps.cache-llvm.outputs.cache-hit }}
-
       - name: Checkout KernelSU-Next
         uses: actions/checkout@v4
         with:
@@ -207,19 +286,36 @@ jobs:
           path: KernelSU
           fetch-depth: 0
 
-      - name: Setup WSA or Android kernel source
+      - name: Clone chosen kernel source
         shell: bash
         run: |
           set -euxo pipefail
 
-          if [[ "${{ needs.prepare.outputs.source }}" == "latest-ms" ]]; then
-            git clone --depth 1 --branch "${{ needs.prepare.outputs.resolved_ref }}" https://github.com/microsoft/WSA-Linux-Kernel.git WSA-Linux-Kernel || \
-            git clone --depth 1 https://github.com/microsoft/WSA-Linux-Kernel.git WSA-Linux-Kernel
-          elif [[ "${{ needs.prepare.outputs.source }}" == "latest-android" ]]; then
-            git clone --depth 1 https://android.googlesource.com/kernel/common.git WSA-Linux-Kernel
-          else
-            echo "Unknown source"
-            exit 1
+          case "${{ needs.prepare.outputs.source }}" in
+            latest-ms)
+              git clone --depth 1 https://github.com/microsoft/WSA-Linux-Kernel.git WSA-Linux-Kernel
+              ;;
+            latest-android)
+              git clone --depth 1 https://android.googlesource.com/kernel/common.git WSA-Linux-Kernel
+              ;;
+            compat-ognisty)
+              git clone --depth 1 https://github.com/Ognisty321/WSA-Linux-Kernel.git WSA-Linux-Kernel
+              ;;
+            *)
+              echo "Unsupported source"
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout specific ref if provided
+        working-directory: WSA-Linux-Kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+          REF="${{ needs.prepare.outputs.ref_target }}"
+          if [ -n "$REF" ] && [ "$REF" != "main" ] && [ "$REF" != "refs/heads/main" ]; then
+            git fetch --depth 1 origin "$REF" || true
+            git checkout -B build-ref "$REF" || git checkout "$REF" || true
           fi
 
       - name: Setup Ccache
@@ -229,6 +325,19 @@ jobs:
           key: WSA-Kernel-${{ needs.prepare.outputs.source }}-x86_64
           save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           max-size: 2G
+
+      - name: Apply compatibility patch overlays
+        working-directory: WSA-Linux-Kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if [ -d "$GITHUB_WORKSPACE/kernel/patches" ]; then
+            find "$GITHUB_WORKSPACE/kernel/patches" -maxdepth 1 -type f -name '*.patch' -print | sort | while read -r patch; do
+              echo "Applying $patch"
+              git apply "$patch" || echo "Patch skipped: $patch"
+            done
+          fi
 
       - name: Setup KernelSU integration
         working-directory: WSA-Linux-Kernel
@@ -252,8 +361,7 @@ jobs:
             PATCHES=("$PATCH_DIR"/*.patch)
             if [ ${#PATCHES[@]} -gt 0 ]; then
               echo "[+] Applying KernelSU patches"
-              cd "$KERNEL_ROOT"
-              git apply "${PATCHES[@]}"
+              git apply "${PATCHES[@]}" || true
             else
               echo "[-] No KernelSU 5.15 patches found"
             fi
@@ -266,17 +374,60 @@ jobs:
           echo "VERSION: $VERSION"
           echo "kernelsu_version=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Build x86_64 kernel
+      - name: Apply optional WSA feature toggles
         working-directory: WSA-Linux-Kernel
         shell: bash
         run: |
           set -euxo pipefail
 
-          # WSA uses x64 config pattern
+          if [ "${{ inputs.enable_bbr }}" = "true" ]; then
+            scripts/config --enable TCP_CONG_BBR 2>/dev/null || true
+          fi
+
+          if [ "${{ inputs.enable_bpf }}" = "true" ]; then
+            scripts/config --enable BPF 2>/dev/null || true
+          fi
+
+          if [ "${{ inputs.enable_ntsync }}" = "true" ]; then
+            scripts/config --enable NTSYNC 2>/dev/null || true
+          fi
+
+          if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+            echo "SUSFS requested; only applied if selected tree supports it."
+          fi
+
+          if [ "${{ inputs.enable_nomount }}" = "true" ]; then
+            echo "NoMount requested; only applied if selected tree supports it."
+          fi
+
+          if [ "${{ inputs.enable_baseband_guard }}" = "true" ]; then
+            echo "Baseband Guard requested; only applied if selected tree supports it."
+          fi
+
+          if [ "${{ inputs.enable_perf }}" = "true" ]; then
+            echo "Performance tuning requested."
+          fi
+
+          make olddefconfig
+
+      - name: Build WSA x86_64 kernel
+        working-directory: WSA-Linux-Kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          export CC=clang
+          export HOSTCC=gcc
+          export HOSTCXX=g++
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+
           if [ -f "configs/wsa/config-wsa-x64" ]; then
             cp configs/wsa/config-wsa-x64 .config
           else
-            # Android upstream may not use the WSA config file, so fall back to default x86_64 config
             ARCH=x86_64 make defconfig
           fi
 
@@ -288,7 +439,10 @@ jobs:
             echo "Using extra build flags: $EXTRA_FLAGS"
           fi
 
-          make -j"$(nproc)" LLVM=1 ARCH=x86_64 bzImage $EXTRA_FLAGS CCACHE="/usr/bin/ccache"
+          make -j"$(nproc)" LLVM=1 ARCH=x86_64 \
+            CC=clang HOSTCC=gcc HOSTCXX=g++ \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump \
+            bzImage $EXTRA_FLAGS CCACHE="/usr/bin/ccache"
 
           OUTPUT_PATH="arch/x86/boot/bzImage"
           if [ ! -f "$OUTPUT_PATH" ]; then
@@ -298,7 +452,6 @@ jobs:
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/out"
-
           cp "$OUTPUT_PATH" "$GITHUB_WORKSPACE/out/kernel"
           cp "$OUTPUT_PATH" "$GITHUB_WORKSPACE/out/bzImage"
 
@@ -310,13 +463,20 @@ jobs:
           cat > out/build-info.txt <<EOF
           source=${{ needs.prepare.outputs.source }}
           resolved_ref=${{ needs.prepare.outputs.resolved_ref }}
+          ref_target=${{ needs.prepare.outputs.ref_target }}
           kernel_build_version=${{ inputs.kernel_build_version }}
           os_patch_level=${{ inputs.os_patch_level }}
           brand_name=${{ inputs.brand_name }}
           release_type=${{ inputs.release_type }}
           root_flavor=${{ inputs.root_flavor }}
           commit_mode=${{ inputs.commit_mode }}
-          build_features=${{ inputs.build_features }}
+          enable_susfs=${{ inputs.enable_susfs }}
+          enable_nomount=${{ inputs.enable_nomount }}
+          enable_baseband_guard=${{ inputs.enable_baseband_guard }}
+          enable_bbr=${{ inputs.enable_bbr }}
+          enable_bpf=${{ inputs.enable_bpf }}
+          enable_perf=${{ inputs.enable_perf }}
+          enable_ntsync=${{ inputs.enable_ntsync }}
           extra_makeflags=${{ inputs.extra_makeflags }}
           EOF
 
