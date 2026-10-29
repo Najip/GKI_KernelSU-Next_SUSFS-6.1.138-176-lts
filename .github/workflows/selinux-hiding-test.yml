@@ -1,15 +1,81 @@
 name: Build Kernel - Selinux hiding test
 
+permissions:
+  contents: write
+  actions: write
+
 on:
   workflow_dispatch:
     inputs:
+      release_type:
+        description: "Release Type"
+        type: choice
+        options:
+          - CI
+          - Pre-Release
+          - Release
+        default: CI
+      use_cache:
+        description: "Use ccache/bazel cache (restore/save)"
+        type: boolean
+        default: true
+      allow_version_mismatch:
+        description: "Force-load modules with mismatched symbol versions ( force check_version() to pass )"
+        type: boolean
+        default: false
+      kernel_build_version:
+        description: "Kernel Version"
+        type: choice
+        options:
+          - All
+          - 5.10.x-android12
+          - 5.10.x-android13
+          - 5.15.x-android13
+          - 5.15.x-android14
+          - 6.1.x-android14
+          - 6.6.x-android15
+          - 6.12.x-android16
+        default: All
+      os_patch_level:
+        description: "Patch date (YYYY-MM), kernel sublevel, lts, or All (no filter)"
+        required: true
+        type: string
+        default: All
+      page_size:
+        description: "ARM64 page size. 16k requires explicitly selecting Kernel Version 6.1.x-android14, 6.6.x-android15 or 6.12.x-android16 (All is rejected)"
+        type: choice
+        options:
+          - 4k
+          - 16k
+        default: 4k
+      brand_name:
+        description: "Kernel Branding (empty = stock version string)"
+        type: string
+        default: Wild
+      keep_kmi:
+        description: "Keep stock KMI generation suffix in kernel version (fix #265)"
+        type: boolean
+        default: false
+      commit_mode:
+        description: "latest = branch tips, verified = audited pins, update = build latest then promote verified pins on success"
+        required: false
+        type: choice
+        options:
+          - latest
+          - verified
+          - update
+        default: verified
       root_flavor:
         description: "Root Flavor"
         type: choice
         options:
-          - KernelSU
           - KernelSU-Next
+          - KernelSU
           - BakaSU
+          - SukiSU-Ultra
+          - KowSU
+          - FinaSU
+          - No Root
           - All (KernelSU-Next + KernelSU + BakaSU)
         default: KernelSU
       use_susfs:
@@ -52,37 +118,10 @@ on:
         description: "Performance"
         type: boolean
         default: false
-      brand_name:
-        description: "Kernel Branding"
-        type: string
-        default: Wild
-      os_patch_level:
-        description: "Patch date (YYYY-MM), kernel sublevel, lts, or All"
-        type: string
-        default: All
-      page_size:
-        description: "ARM64 page size"
-        type: choice
-        options:
-          - 4k
-          - 16k
-        default: 4k
-      allow_version_mismatch:
-        description: "Force-load modules with mismatched symbol versions"
+      test_release_notes:
+        description: "Render release notes preview only (skip all builds + release)"
         type: boolean
         default: false
-      use_cache:
-        description: "Use ccache/bazel cache"
-        type: boolean
-        default: true
-      keep_kmi:
-        description: "Keep stock KMI suffix"
-        type: boolean
-        default: false
-
-permissions:
-  contents: write
-  actions: write
 
 jobs:
   resolve-sources:
@@ -90,16 +129,18 @@ jobs:
     outputs:
       nomount_commit: ${{ steps.resolve.outputs.nomount_commit }}
       kernelsu_commit: ${{ steps.resolve.outputs.kernelsu_commit }}
+      kernelsu_branch: ${{ steps.resolve.outputs.kernelsu_branch }}
+      root_flavor: ${{ steps.resolve.outputs.root_flavor }}
+      root_matrix: ${{ steps.resolve.outputs.root_matrix }}
+      susfs_commit_android14_6_1: ${{ steps.resolve.outputs.susfs_commit_android14_6_1 }}
       kernel_patches_commit: ${{ steps.resolve.outputs.kernel_patches_commit }}
       anykernel3_commit: ${{ steps.resolve.outputs.anykernel3_commit }}
       droidspaces_commit: ${{ steps.resolve.outputs.droidspaces_commit }}
-      susfs_commit_android14_6_1: ${{ steps.resolve.outputs.susfs_commit_android14_6_1 }}
       feature_set: ${{ steps.features.outputs.feature_set }}
-      root_matrix: ${{ steps.resolve.outputs.root_matrix }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Resolve custom source commits
+      - name: Resolve source commits and matrix
         id: resolve
         shell: bash
         run: |
@@ -119,7 +160,6 @@ jobs:
             echo "$key=$value" >> "$GITHUB_OUTPUT"
           }
 
-          # KernelSU fork override for selinux-hiding test builds
           KSU_FORK_REPO="https://github.com/Najip/KernelSU.git"
           KSU_NEXT_REPO="https://github.com/KernelSU-Next/KernelSU-Next.git"
           BAKASU_REPO="https://github.com/Baka-SU/BakaSU.git"
@@ -130,8 +170,8 @@ jobs:
           DROIDSPACES_REPO="https://github.com/ravindu644/Droidspaces-OSS.git"
 
           NOMOUNT_COMMIT="$(resolve_sha "$NOMOUNT_REPO" refs/heads/dev)"
-          KSU_FORK_COMMIT="$(resolve_sha "$KSU_FORK_REPO" refs/heads/main)"
-          KSU_NEXT_COMMIT="$(resolve_sha "$KSU_NEXT_REPO" refs/heads/dev)"
+          KSU_COMMIT="$(resolve_sha "$KSU_FORK_REPO" refs/heads/main)"
+          NEXT_COMMIT="$(resolve_sha "$KSU_NEXT_REPO" refs/heads/dev)"
           BAKASU_COMMIT="$(resolve_sha "$BAKASU_REPO" refs/heads/main)"
           SUSFS_614="$(resolve_sha "$SUSFS_REPO" refs/heads/gki-android14-6.1)"
           KERNEL_PATCHES_COMMIT="$(resolve_sha "$KERNEL_PATCHES_REPO" refs/heads/main)"
@@ -139,11 +179,8 @@ jobs:
           DROIDSPACES_COMMIT="$(resolve_sha "$DROIDSPACES_REPO" refs/heads/main)"
 
           emit nomount_commit "$NOMOUNT_COMMIT"
-          emit kernelsu_commit "$KSU_FORK_COMMIT"
-          emit susfs_commit_android14_6_1 "$SUSFS_614"
-          emit kernel_patches_commit "$KERNEL_PATCHES_COMMIT"
-          emit anykernel3_commit "$ANYKERNEL_COMMIT"
-          emit droidspaces_commit "$DROIDSPACES_COMMIT"
+          emit kernelsu_commit "$KSU_COMMIT"
+          echo "kernelsu_branch=main" >> "$GITHUB_OUTPUT"
 
           mk_entry() {
             printf '{"root_flavor":"%s","variant":"%s","root_commit":"%s","produce":%s}' "$1" "$2" "$3" "$4"
@@ -151,16 +188,36 @@ jobs:
 
           case "${{ inputs.root_flavor || 'KernelSU' }}" in
             KernelSU)
-              ROOT_MATRIX="[$(mk_entry kernelsu KernelSU "$KSU_FORK_COMMIT" true)]"
+              echo "root_flavor=kernelsu" >> "$GITHUB_OUTPUT"
+              ROOT_MATRIX="[$(mk_entry kernelsu KernelSU "$KSU_COMMIT" true)]"
               ;;
             KernelSU-Next)
-              ROOT_MATRIX="[$(mk_entry next KernelSU-Next "$KSU_NEXT_COMMIT" true)]"
+              echo "root_flavor=next" >> "$GITHUB_OUTPUT"
+              ROOT_MATRIX="[$(mk_entry next KernelSU-Next "$NEXT_COMMIT" true)]"
               ;;
             BakaSU)
+              echo "root_flavor=bakasu" >> "$GITHUB_OUTPUT"
               ROOT_MATRIX="[$(mk_entry bakasu BakaSU "$BAKASU_COMMIT" true)]"
               ;;
+            SukiSU-Ultra)
+              echo "root_flavor=sukisu-ultra" >> "$GITHUB_OUTPUT"
+              ROOT_MATRIX="[$(mk_entry sukisu-ultra SukiSU-Ultra "$BAKASU_COMMIT" true)]"
+              ;;
+            KowSU)
+              echo "root_flavor=kowsu" >> "$GITHUB_OUTPUT"
+              ROOT_MATRIX="[$(mk_entry kowsu KowSU "$BAKASU_COMMIT" true)]"
+              ;;
+            FinaSU)
+              echo "root_flavor=finasu" >> "$GITHUB_OUTPUT"
+              ROOT_MATRIX="[$(mk_entry finasu FinaSU "$KSU_COMMIT" true)]"
+              ;;
+            "No Root")
+              echo "root_flavor=none" >> "$GITHUB_OUTPUT"
+              ROOT_MATRIX="[$(mk_entry none NoRoot "" true)]"
+              ;;
             "All (KernelSU-Next + KernelSU + BakaSU)")
-              ROOT_MATRIX="[$(mk_entry next KernelSU-Next "$KSU_NEXT_COMMIT" true),$(mk_entry kernelsu KernelSU "$KSU_FORK_COMMIT" false),$(mk_entry bakasu BakaSU "$BAKASU_COMMIT" false)]"
+              ROOT_MATRIX="[$(mk_entry next KernelSU-Next "$NEXT_COMMIT" true),$(mk_entry kernelsu KernelSU "$KSU_COMMIT" false),$(mk_entry bakasu BakaSU "$BAKASU_COMMIT" false)]"
+              echo "root_flavor=" >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "ERROR: unknown root_flavor '${{ inputs.root_flavor }}'" >&2
@@ -168,9 +225,13 @@ jobs:
               ;;
           esac
 
+          emit susfs_commit_android14_6_1 "$SUSFS_614"
+          emit kernel_patches_commit "$KERNEL_PATCHES_COMMIT"
+          emit anykernel3_commit "$ANYKERNEL_COMMIT"
+          emit droidspaces_commit "$DROIDSPACES_COMMIT"
           echo "root_matrix=$ROOT_MATRIX" >> "$GITHUB_OUTPUT"
 
-      - name: Compose feature set
+      - name: Compose requested feature set
         id: features
         shell: bash
         run: |
@@ -202,6 +263,7 @@ jobs:
 
   build-android14-6-1:
     needs: resolve-sources
+    if: ${{ !cancelled() && !inputs.test_release_notes }}
     strategy:
       fail-fast: false
       matrix:
