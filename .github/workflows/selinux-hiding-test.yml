@@ -119,14 +119,24 @@ jobs:
             echo "$key=$value" >> "$GITHUB_OUTPUT"
           }
 
-          NOMOUNT_COMMIT="$(resolve_sha https://github.com/maxsteeel/nomount.git refs/heads/dev)"
-          KSU_FORK_COMMIT="$(resolve_sha https://github.com/Najip/KernelSU.git refs/heads/main)"
-          KSU_NEXT_COMMIT="$(resolve_sha https://github.com/KernelSU-Next/KernelSU-Next.git refs/heads/dev)"
-          BAKASU_COMMIT="$(resolve_sha https://github.com/Baka-SU/BakaSU.git refs/heads/main)"
-          SUSFS_614="$(resolve_sha https://gitlab.com/simonpunk/susfs4ksu.git refs/heads/gki-android14-6.1)"
-          KERNEL_PATCHES_COMMIT="$(resolve_sha https://github.com/WildKernels/kernel_patches.git refs/heads/main)"
-          ANYKERNEL_COMMIT="$(resolve_sha https://github.com/WildKernels/AnyKernel3.git refs/heads/gki-2.0)"
-          DROIDSPACES_COMMIT="$(resolve_sha https://github.com/ravindu644/Droidspaces-OSS.git refs/heads/main)"
+          # KernelSU fork override for selinux-hiding test builds
+          KSU_FORK_REPO="https://github.com/Najip/KernelSU.git"
+          KSU_NEXT_REPO="https://github.com/KernelSU-Next/KernelSU-Next.git"
+          BAKASU_REPO="https://github.com/Baka-SU/BakaSU.git"
+          NOMOUNT_REPO="https://github.com/maxsteeel/nomount.git"
+          SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
+          KERNEL_PATCHES_REPO="https://github.com/WildKernels/kernel_patches.git"
+          ANYKERNEL_REPO="https://github.com/WildKernels/AnyKernel3.git"
+          DROIDSPACES_REPO="https://github.com/ravindu644/Droidspaces-OSS.git"
+
+          NOMOUNT_COMMIT="$(resolve_sha "$NOMOUNT_REPO" refs/heads/dev)"
+          KSU_FORK_COMMIT="$(resolve_sha "$KSU_FORK_REPO" refs/heads/main)"
+          KSU_NEXT_COMMIT="$(resolve_sha "$KSU_NEXT_REPO" refs/heads/dev)"
+          BAKASU_COMMIT="$(resolve_sha "$BAKASU_REPO" refs/heads/main)"
+          SUSFS_614="$(resolve_sha "$SUSFS_REPO" refs/heads/gki-android14-6.1)"
+          KERNEL_PATCHES_COMMIT="$(resolve_sha "$KERNEL_PATCHES_REPO" refs/heads/main)"
+          ANYKERNEL_COMMIT="$(resolve_sha "$ANYKERNEL_REPO" refs/heads/gki-2.0)"
+          DROIDSPACES_COMMIT="$(resolve_sha "$DROIDSPACES_REPO" refs/heads/main)"
 
           emit nomount_commit "$NOMOUNT_COMMIT"
           emit kernelsu_commit "$KSU_FORK_COMMIT"
