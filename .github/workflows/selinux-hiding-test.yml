@@ -1,4 +1,4 @@
-name: Build Kernels
+name: Build Kernels (selinux hiding test)
 
 permissions:
   contents: write
